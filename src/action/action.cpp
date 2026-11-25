@@ -2,6 +2,7 @@
 #include "robot/state.h"
 #include "motor/motor.h"
 #include "motion/time.h"
+#include "motion/gait.h"
 #include <Arduino.h>
 #include <math.h>
 #include <atomic>
@@ -11,6 +12,10 @@
 namespace {
 constexpr uint32_t kResetTicks = SEC_2_TICK(0.6);
 constexpr uint8_t kResetMotorSpeed = 40;
+// 255 interrupt: let the gait land and center the feet before Reset.
+constexpr uint32_t kStopSettleTimeoutMs = 600;
+bool stopPendingReset = false;
+uint32_t stopStartMs = 0;
 std::atomic<uint32_t> resetStartedMs{0};
 constexpr uint32_t kLoopPauseTicks = SEC_2_TICK(1.0);
 constexpr uint16_t LOW_SPEED = 90;
@@ -92,11 +97,15 @@ const Posture Get_Up_Postures[] = {
 //Crawling
 const Posture Crawling_Postures[] = {
     {SEC_2_TICK(3.5),  PoseMode::Body, MEDIUM_SPEED, {0, 0, -100.0, 0, 0, 0,   8, 0, 0, SLOW_SPEED,   0, 0, 0, 0, 0, 0,   0, 0.0, 85.0, -90.0, 0.0}},
+    // Settle frame: zero motion so the gait brakes and centers the feet.
+    {SEC_2_TICK(0.7),  PoseMode::Body, MEDIUM_SPEED, {0, 0, -100.0, 0, 0, 0,   0, 0, 0, SLOW_SPEED,   0, 0, 0, 0, 0, 0,   0, 0.0, 85.0, -90.0, 0.0}},
 };
 
 // Turn_Around
 const Posture Turn_Around_Postures[] = {
     {SEC_2_TICK(3.8),  PoseMode::Body, 0, {0, 0, 0.0, 0, 0, 0,   0, 0, 0.5, NORMAL_SPEED,   0, 0, 0, 0, 0, 0,   0, 0.0, 85.0, -90.0, 0.0}},
+    // Settle frame: zero motion so the gait brakes and centers the feet.
+    {SEC_2_TICK(0.7),  PoseMode::Body, 0, {0, 0, 0.0, 0, 0, 0,   0, 0, 0,   NORMAL_SPEED,   0, 0, 0, 0, 0, 0,   0, 0.0, 85.0, -90.0, 0.0}},
 };
 
 //Squat
@@ -506,6 +515,7 @@ void applyPosture(const Posture& posture) {
 } // namespace
 
 void Reset(uint8_t mode) {
+    stopPendingReset = false;
     if (mode > 0) {
         Action_Ctx.id = 0;
         Action_Ctx.frame = 0;
@@ -559,9 +569,27 @@ void SetAction(uint8_t id) {
     Action_Ctx.next_tick = 0;
 }
 
+// Zero the motion command and wait (bounded) for the gait to land and center.
+static bool waitGaitSettled()
+{
+    body.vx = 0;
+    body.vy = 0;
+    body.vyaw = 0;
+    imu.yaw_speed = 0;
+    const uint32_t now = millis();
+    if (!stopPendingReset) {
+        stopPendingReset = true;
+        stopStartMs = now;
+    }
+    if (GaitIsActive() && (now - stopStartMs) < kStopSettleTimeoutMs) return false;
+    stopPendingReset = false;
+    return true;
+}
+
 void ActionManager() {
     updateFoldArm();
     if (Action_Ctx.id == 255) {
+        if (!waitGaitSettled()) return;
         Reset(2);
         return;
     }
@@ -583,6 +611,8 @@ void ActionManager() {
     // Both action forms share the standing reset and its 600 ms deadline.
     if (Action_Ctx.frame == 0 &&
         (action->update || Action_Ctx.cur_tick >= Action_Ctx.next_tick)) {
+        // A new action can interrupt a moving one; settle before the reset.
+        if (!waitGaitSettled()) return;
         Reset(0);
         Action_Ctx.frame = 1;
         Action_Ctx.next_tick = kResetTicks;
