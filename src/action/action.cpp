@@ -14,7 +14,7 @@ constexpr uint32_t kResetTicks = SEC_2_TICK(0.6);
 constexpr uint8_t kResetMotorSpeed = 40;
 // 255 interrupt: let the gait land and center the feet before Reset.
 constexpr uint32_t kStopSettleTimeoutMs = 600;
-bool stopPendingReset = false;
+std::atomic<bool> stopPendingReset{false};
 uint32_t stopStartMs = 0;
 std::atomic<uint32_t> resetStartedMs{0};
 constexpr uint32_t kLoopPauseTicks = SEC_2_TICK(1.0);
@@ -515,7 +515,7 @@ void applyPosture(const Posture& posture) {
 } // namespace
 
 void Reset(uint8_t mode) {
-    stopPendingReset = false;
+    stopPendingReset.store(false, std::memory_order_relaxed);
     if (mode > 0) {
         Action_Ctx.id = 0;
         Action_Ctx.frame = 0;
@@ -576,14 +576,12 @@ static bool waitGaitSettled()
     body.vy = 0;
     body.vyaw = 0;
     imu.yaw_speed = 0;
+    yaw_track_flag = 0;
+    if (gm.gait_type == GAIT_MARKTIME) GaitSetType(GAIT_TROT);
+    if (!GaitIsActive()) return true;
     const uint32_t now = millis();
-    if (!stopPendingReset) {
-        stopPendingReset = true;
-        stopStartMs = now;
-    }
-    if (GaitIsActive() && (now - stopStartMs) < kStopSettleTimeoutMs) return false;
-    stopPendingReset = false;
-    return true;
+    if (!stopPendingReset.exchange(true, std::memory_order_relaxed)) stopStartMs = now;
+    return (now - stopStartMs) >= kStopSettleTimeoutMs;
 }
 
 void ActionManager() {

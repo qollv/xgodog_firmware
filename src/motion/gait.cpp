@@ -57,6 +57,7 @@ float lowTrotStrideX() {
 void GaitResetWalk() {
     high_walk.reset();
     ordinary_gait.reset();
+    applyFeet({});
 }
 
 static void prepareLowTrot(float *vx) {
